@@ -7,34 +7,37 @@ from pathlib import Path
 import uuid
 import time
 import streamlit as st
-import openai
 import logging
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.document_loaders import PyPDFLoader
-from langchain.embeddings import HuggingFaceEmbeddings
-from langchain.vectorstores import FAISS
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_community.vectorstores import FAISS
 from langchain.chains import RetrievalQA
-from langchain.chat_models import ChatOpenAI
+from langchain_community.chat_models import ChatOpenAI
+from langchain_openai import ChatOpenAI
 from langchain.prompts import PromptTemplate
-from langchain.embeddings import OpenAIEmbeddings
-
+from langchain_openai import OpenAIEmbeddings
 
 # Set page config at the top
 st.set_page_config(page_title="Smart Business Guide")
 
+# Set OpenAI API key
+try:
+    from dotenv import load_dotenv
+    load_dotenv('./.env')
+except:
+    pass
+
 # Configuration for OpenAI's embedding model
 class Config:
     MODEL = "gpt-4o-mini"
-    EMBEDDING_MODEL_NAME = "text-embedding-3-small"  
+    EMBEDDING_MODEL_NAME = "text-embedding-3-small"
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
 # Check if the API key is set
 if not Config.OPENAI_API_KEY:
     st.error("This application requires OpenAI API key which is not set. Please set the OPENAI_API_KEY environment variable.")
     st.stop()
-
-# Set OpenAI API key
-openai.api_key = Config.OPENAI_API_KEY
 
 # Set up logging
 logging.basicConfig(level=logging.ERROR, filename='app_errors.log')
@@ -72,6 +75,8 @@ def process_pdf(file, chunk_size, chunk_overlap):
     loader = PyPDFLoader(filename)
     pages = loader.load_and_split()
 
+    file_summary = {'pages':len(pages),'characters':sum([len(x.page_content) for x in pages])}
+
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
@@ -80,7 +85,7 @@ def process_pdf(file, chunk_size, chunk_overlap):
 
     os.remove(filename)
 
-    return chunks, file.name
+    return chunks, file.name,file_summary
 
 def create_context(chunks):
     return "\n\n".join([chunk.page_content for chunk in chunks])
@@ -107,12 +112,14 @@ def load_embedding_model(model_name, normalize_embedding=True):
 
 #Function to create OpenAI embeddings
 def create_embeddings(chunks, embedding_model, storing_path="vectorstore"):
-    print("Creating embeddings...")
+    print(f"Creating embeddings ({len(chunks)} chunks)...")
     if not chunks:
         print("Warning: No chunks to process. The PDF might be empty or unreadable.")
         return None
     vectorstore = FAISS.from_documents(chunks, embedding_model)
+    print('saving vectorstore...',end='')
     vectorstore.save_local(storing_path)
+    print(' done')
     return vectorstore
 
 #Load the chain
@@ -172,18 +179,21 @@ class PDFHelper:
         vectorstore = self.load_vectorstore(vectorstore_path)
 
         # Convert the query to embeddings and retrieve relevant chunks
-        retriever = vectorstore.as_retriever()
+        print('...retrieving relevant context from vectorstore ', end='')
+        retriever = vectorstore.as_retriever(search_kwargs={'k': 5,'fetch_k':30,'filter': None}, search_type="mmr")
         retrieved_docs = retriever.get_relevant_documents(question)  # Get relevant chunks
+        print(f'... done ({len(retrieved_docs)} documents/chunks)')
 
         # Extract the content from the retrieved chunks and combine them into context
         context = "\n\n".join([doc.page_content for doc in retrieved_docs])
 
         # Define the prompt template
         prompt_template = """
-        You are an honest assistant.
-        You have to provide a precise answer to a query from the given context/information.
-        If you don't know the answer, just say you don't know. Don't try to make up an answer.
-        Strictly consider the following rules: 
+        # Instructions #
+        You are an honest and smart assistant.
+        You must provide a precise answer to a query from the given context/information.
+        If you don't know the answer, say you don't know. Don't make up an answer.
+        Strictly follow these rules: 
         i) Analyze the query to provide only the precise answer. Do not provide any additional information unless necessary and helpful in the query's context.
         ii) You do not need to provide the answer exactly in the same words as in the context/information. You may style the answer in appropriate format and words. For example:
         query_example = "query: What are the working hours in Finland?"
@@ -191,13 +201,14 @@ class PDFHelper:
         your_answer = "The working hours in Finland are 40 hours per week."
         iii) Consider creating bullet points or bold headings/sub-headings or other formatting as necessary.
 
-        Context:
+        # Context #
         {context}
 
-        Question:
+        # Question #
         {question}
 
-        Response:
+        # Response #
+        Your response:
         """
 
         # Create a valid PromptTemplate object
@@ -263,25 +274,26 @@ def main():
 
     with st.sidebar:
         st.write('This smart guide answers questions from a PDF guide.')
-        available_models = ["gpt-4o-mini", "gpt-4"]
+        available_models = ["gpt-4o-mini", "gpt-4o"]
         selected_model = st.selectbox("Select a model", available_models)
 
         uploaded_file = st.file_uploader("Upload a PDF file (optional)", type="pdf")
 
         if uploaded_file is not None:
             st.write("PDF mode: Ask questions about the uploaded document.")
-            chunk_size = 1000
+            chunk_size = 600
             chunk_overlap = 100
 
             if st.session_state.current_file != uploaded_file.name:
-                chunks, filename = process_pdf(uploaded_file, chunk_size, chunk_overlap)
-                context = create_context(chunks)
+                chunks, filename, file_summary = process_pdf(uploaded_file, chunk_size, chunk_overlap)
+                context = f'Total {len(chunks)} chunks with properties {str(file_summary)}'
                 st.session_state.context = context
                 st.session_state.current_file = filename
 
                 # Create and save the vectorstore
                 vector_store_directory = os.path.join(str(Path.home()), 'langchain-store', 'vectorstore',
                                                       'pdf-doc-helper-store', str(uuid.uuid4()))
+                print(f'...saving vectorstore file in {vector_store_directory}')
                 os.makedirs(vector_store_directory, exist_ok=True)
                 embed = load_embedding_model(model_name=Config.EMBEDDING_MODEL_NAME)
                 vectorstore = create_embeddings(chunks=chunks, embedding_model=embed, storing_path=vector_store_directory)
