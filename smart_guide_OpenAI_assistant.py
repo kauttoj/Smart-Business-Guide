@@ -3,7 +3,6 @@ import os
 import streamlit as st
 from streamlit import session_state as ss
 from dotenv import load_dotenv
-import openai
 from openai.types.beta.assistant_stream_event import ThreadMessageDelta, ThreadRunRequiresAction, \
     ThreadMessageInProgress, ThreadMessageCompleted, ThreadRunCompleted
 from openai.types.beta.threads.text_delta_block import TextDeltaBlock
@@ -12,31 +11,91 @@ import time
 import requests
 from bs4 import BeautifulSoup
 from openai import OpenAI
+import re
 
 # openai variables
 load_dotenv()
-client = openai.OpenAI()
 model = 'gpt-4o-mini'
-assistant_id = os.getenv('ASSISTANT_ID')
+client = OpenAI()
 
-assistant_summary=''
+def create_assistant():
+    print('CREATING NEW ASSISTANT')
+    print('...creating a vectorstore')
+    # Create a vector store caled "Financial Statements"
+    vector_store = client.beta.vector_stores.create(name="guides datafiles 1",
+        chunking_strategy = {
+            'type': 'static',
+            'static': {
+                'max_chunk_size_tokens': 800,
+                'chunk_overlap_tokens': 400
+            }
+        }
+    )
+    # Ready the files for upload to OpenAI
+    FILES_TO_UPLOAD = ['GUIDET_Becoming_Entrepreneur_in_Finland.pdf']
+    file_streams = [open(path, "rb") for path in FILES_TO_UPLOAD]
+
+    # Use the upload and poll SDK helper to upload the files, add them to the vector store,
+    # and poll the status of the file batch for completion.
+    file_batch = client.beta.vector_stores.file_batches.upload_and_poll(
+        vector_store_id=vector_store.id, files=file_streams
+    )
+
+    print('...file status:')
+    print('......' + str(file_batch.status))
+    print('......' + str(file_batch.file_counts))
+
+    print('...creating assistant')
+    my_assistant = client.beta.assistants.create(
+        description='Smart guides assistant',
+        instructions='You are an honest and smart assistant that helps immigrants and enterpreneurs in Finland. You only respond questions related to those topics.\nYou must provide a precise answer to a query using your knowledge. If answer cannot be found in knowledge, say you don\'t know. Don\'t make up an answer.\nStrictly follow these rules: \n1. Analyze the query to provide only the precise answer. Do not provide any additional information unless necessary and helpful in the query\'s context.\n2. You do not need to provide the answer exactly in the same words as in the context/information. You may style the answer in appropriate format and words. \nFor example:\nquery = "query: What are the working hours in Finland?"\ncontext = "weekly working time should not exceed 40 hours"\nresponse = "The working hours in Finland are 40 hours per week."\n3. Consider creating bullet points or bold headings/sub-headings or other formatting as necessary.',
+        model='gpt-4o-mini',temperature = 0.05,name='Smart-Business-Guide (API)',
+        tools=[{"type": "file_search"},{'type':'function','function': {
+                   'name': 'get_tax_rates',
+                   'description': 'Get the current tax rates in Finland',
+                   'parameters': {'type': 'object', 'properties': {}, 'additionalProperties': False, 'required': []},
+                   'strict': True
+               }},
+               {'type':'function','function': {
+                   'name': 'get_migri_contacts',
+                   'description': 'Get contact information of immigration services (migri) in Finland',
+                   'parameters': {'type': 'object', 'properties': {}, 'additionalProperties': False, 'required': []},
+                   'strict': True
+               }}
+               ],
+    )
+    print('...adding vectorstore to assistant')
+    my_assistant = client.beta.assistants.update(
+        assistant_id=my_assistant.id,
+        tool_resources={"file_search": {"vector_store_ids": [vector_store.id]}},
+    )
+    print('...done!')
+    return my_assistant
+
 try:
-    client = OpenAI()
+    assistant_id = os.getenv('ASSISTANT_ID')
     my_assistant = client.beta.assistants.retrieve(assistant_id)
+    print('using existing assistant')
+except:
+    my_assistant = create_assistant()
+    os.environ["ASSISTANT_ID"]=my_assistant.id
+    assistant_id = os.getenv('ASSISTANT_ID')
+    print(f'created new assistant with ID {assistant_id}')
+
+def get_assistant_summary():
     tools = my_assistant.tools
-    if 0: # get names through vectorstores
+    print('...getting assistant summary info')
+    if 1: # get names through vectorstores
         databases = [x for x in my_assistant.tool_resources if x[0]=='file_search']
         vector_store_ids = list(*[x[1].vector_store_ids for x in databases])
         vector_store_objects = [client.beta.vector_stores.files.list(vector_store_id=id) for id in vector_store_ids]
         vector_store_files = [y.id for y in list(*[x.data for x in vector_store_objects])]
         filenames = [client.files.retrieve(x).filename for x in vector_store_files]
-    else: # get names directly
+    else: # get all files, might not be part of assistant!
         filenames = [x.filename for x in client.files.list()]
     assistant_summary = f'functions ({len(tools)}):'+'  \n'+'  \n'.join(['-'+x.function.description for x in tools if (x.type=='function')]) + '  \n' + f'files ({len(filenames)}): ' + '; '.join(['"'+x+'"' for x in filenames])
-except:
-    pass
-
-import re
+    print('...done!')
+    return assistant_summary
 
 tax_rates_url = r'https://www.vero.fi/en/businesses-and-corporations/taxes-and-charges/vat/rates-of-vat/'
 migri_contacts_url = r'https://migri.fi/en/contact-information'
@@ -221,6 +280,7 @@ st.title("Smart guides")
 
 # Display initial message if not shown before
 if not ss.initial_message_shown:
+    assistant_summary = get_assistant_summary()
     initial_message = "Hello! I'm an entrepreneurship assistant. I have following tools in use:\n\n"+ assistant_summary + "\n\nHow can I assist you today?"
     ss.initial_message_shown = True
     ss.chat_history.append({"role": "assistant", "content": initial_message})
