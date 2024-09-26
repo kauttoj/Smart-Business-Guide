@@ -7,7 +7,6 @@ import openai
 from openai.types.beta.assistant_stream_event import ThreadMessageDelta, ThreadRunRequiresAction, \
     ThreadMessageInProgress, ThreadMessageCompleted, ThreadRunCompleted
 from openai.types.beta.threads.text_delta_block import TextDeltaBlock
-from agent_functions import *
 import json
 import time
 import requests
@@ -49,7 +48,6 @@ def remove_tags(soup):
 
     # Extract text while preserving structure
     content = ""
-
     for element in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'li']):
         text = element.get_text(strip=True)
         if element.name.startswith('h'):
@@ -62,23 +60,19 @@ def remove_tags(soup):
 
     return content
 
+def get_html(url):
+    response = requests.get(url)
+    if response.status_code != 200:
+        raise Exception("Failed to retrieve agencies")
+    soup = BeautifulSoup(response.text, "html.parser")
+    text = remove_tags(soup)
+    return text
+
 def execute_required_function(func_name, arguments):
     if func_name == "get_tax_rates":
-        response = requests.get(tax_rates_url)
-        if response.status_code != 200:
-            raise Exception("Failed to retrieve agencies")
-        soup = BeautifulSoup(response.text, "html.parser")
-        text = remove_tags(soup)
-        return text
+        return get_html(tax_rates_url)
     if func_name == "get_migri_contacts":
-        response = requests.get(migri_contacts_url)
-        if response.status_code != 200:
-            raise Exception("Failed to retrieve agencies")
-        soup = BeautifulSoup(response.text, "html.parser")
-        text = remove_tags(soup)
-        return text
-
-
+        return get_html(migri_contacts_url)
 
 class Assistant:
     thread_id = ""
